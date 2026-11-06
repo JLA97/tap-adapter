@@ -52,9 +52,14 @@ export default {
   },
   columns: ['rank', 'title', 'score', 'comments', 'author', 'selftext', 'url'],
   pipeline: [
-    { navigate: 'https://www.reddit.com/r/${{ args.subreddit }}/hot/' },
-    { evaluate: `(async () => {
-        const requestedLimit = Number('\${{ args.limit }}') || 30;
+    {
+      "navigate": "https://www.reddit.com/r/${{ args.subreddit }}/hot/"
+    },
+    {
+      "evaluate": `(async () => {
+        const requestedLimit = Number(\${{ args.limit }});
+        if (!Number.isInteger(requestedLimit) || requestedLimit < 0) throw new Error('Reddit hot: invalid limit.');
+        if (!requestedLimit) return [];
         const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
         for (let i = 0; i < 20 && !document.querySelector('shreddit-feed, shreddit-post'); i += 1) {
@@ -88,8 +93,13 @@ export default {
         const seen = new Set();
         const results = [];
 
-        for (let page = 0; page < 6 && nextUrl && results.length < requestedLimit; page += 1) {
+        const visitedPages = new Set();
+        for (let page = 0; page < 100 && nextUrl && results.length < requestedLimit; page += 1) {
+          if (visitedPages.has(nextUrl)) throw new Error('Reddit hot: repeated pagination cursor.');
+          visitedPages.add(nextUrl);
+          const before = results.length;
           const response = await fetch(nextUrl, {
+            signal: AbortSignal.timeout(12000),
             credentials: 'include',
             headers: { Accept: 'text/html' },
           });
@@ -107,6 +117,8 @@ export default {
             if (results.length >= requestedLimit) break;
           }
 
+          if (!doc.querySelector('shreddit-post') && (page === 0 || doc.querySelector('faceplate-partial[slot="load-after"]'))) throw new Error('Reddit hot: partial page contained no posts; cannot infer an empty feed.');
+          if (results.length === before) throw new Error('Reddit hot: pagination made no progress.');
           nextUrl = doc.querySelector('faceplate-partial[slot="load-after"][src*="community-more-posts"]')?.getAttribute('src') || '';
         }
 
@@ -114,17 +126,9 @@ export default {
           throw new Error('No reddit posts found in the page HTML. Confirm the subreddit page loaded and the browser session is logged in.');
         }
 
-        return results;
-      })()` },
-    { map: {
-      rank: '${{ index + 1 }}',
-      title: '${{ item.title }}',
-      score: '${{ item.score }}',
-      comments: '${{ item.comments }}',
-      author: '${{ item.author }}',
-      selftext: '${{ item.selftext }}',
-      url: '${{ item.url }}',
-    }},
-    { limit: '${{ args.limit }}' },
+        if (nextUrl && results.length < requestedLimit) throw new Error('Reddit hot: pagination safety bound reached before limit.');
+        return results.map((post, index) => ({rank:index + 1, ...post}));
+      })()`
+    }
   ],
 };

@@ -31,50 +31,38 @@ export default {
   },
   columns: ['title', 'date', 'url'],
   pipeline: [
-    { navigate: '${{ args.url }}' },
-    { evaluate: `(() => {
-      const title = document.querySelector('h1')?.textContent?.trim() || '';
-      const date = document.querySelector('[class*="HeroEngineering"][class*="date"]')?.textContent?.trim() || '';
-
-      const bodyDiv = document.querySelector('[class*="Body-module"]');
-      if (!bodyDiv) return [{ title, date, content: '', url: location.href }];
-
-      const elements = bodyDiv.querySelectorAll('h2, h3, h4, p, pre, blockquote, ul, ol');
-      const parts = [];
-
-      for (const el of elements) {
-        const tag = el.tagName.toLowerCase();
-        const text = el.textContent.trim();
-        if (!text) continue;
-
-        if (tag.match(/^h[2-4]$/)) {
-          const hashes = '#'.repeat(parseInt(tag[1]));
-          parts.push('\\n' + hashes + ' ' + text + '\\n');
-        } else if (tag === 'p') {
-          parts.push(text);
-        } else if (tag === 'pre') {
-          parts.push('\\n\\\`\\\`\\\`\\n' + text + '\\n\\\`\\\`\\\`\\n');
-        } else if (tag === 'blockquote') {
-          parts.push(text.split('\\n').map(l => '> ' + l).join('\\n'));
-        } else if (tag === 'ul') {
-          parts.push(Array.from(el.querySelectorAll('li')).map(li => '- ' + li.textContent.trim()).join('\\n'));
-        } else if (tag === 'ol') {
-          parts.push(Array.from(el.querySelectorAll('li')).map((li, i) => (i + 1) + '. ' + li.textContent.trim()).join('\\n'));
-        }
-      }
-
-      return [{
-        title: title,
-        date: date,
-        content: parts.join('\\n\\n'),
-        url: location.href,
-      }];
-    })()` },
-    { map: {
-      title:   '${{ item.title }}',
-      date:    '${{ item.date }}',
-      content: '${{ item.content }}',
-      url:     '${{ item.url }}',
-    }},
+    {
+      "navigate": "${{ args.url }}"
+    },
+    {
+      "evaluate": `(() => {
+  const title = document.querySelector('h1')?.textContent.trim();
+  const time = document.querySelector('main time');
+  const date = time?.textContent.trim() || document.querySelector('[class*="HeroEngineering"][class*="date"]')?.textContent.trim().replace(/^Published\\s+/, '');
+  const body = document.querySelector('[data-article-body], [class*="Body-module"]');
+  if (!title || !date || !body || !Number.isFinite(Date.parse(date)))
+    throw new Error('Anthropic article: title, date or body missing: ' + location.href);
+  const parts = [];
+  const visit = element => {
+    const tag = element.tagName;
+    const text = element.textContent.trim();
+    if (/^H[2-6]$/.test(tag)) { if (text) parts.push('#'.repeat(Number(tag[1])) + ' ' + text); }
+    else if (tag === 'PRE') { if (text) parts.push(String.fromCharCode(96).repeat(3) + '\\n' + text + '\\n' + String.fromCharCode(96).repeat(3)); }
+    else if (tag === 'P') { if (text) parts.push(text); }
+    else if (tag === 'UL' || tag === 'OL') {
+      parts.push([...element.children].filter(x => x.tagName === 'LI').map((li,i) => (tag === 'OL' ? (i+1) + '. ' : '- ') + li.textContent.trim()).join('\\n'));
+    } else if (tag === 'BLOCKQUOTE') { if (text) parts.push(text.split('\\n').map(line => '> ' + line).join('\\n')); }
+    else if (tag === 'TABLE') {
+      for (const row of element.querySelectorAll('tr')) parts.push('| ' + [...row.querySelectorAll('th,td')].map(cell => cell.textContent.trim()).join(' | ') + ' |');
+    } else if (!['SCRIPT','STYLE','NAV','ASIDE'].includes(tag)) {
+      for (const child of element.children) visit(child);
+    }
+  };
+  for (const child of body.children) visit(child);
+  const content = parts.filter(Boolean).join('\\n\\n');
+  if (!content) throw new Error('Anthropic article: empty body: ' + location.href);
+  return [{title,date,content,url:document.querySelector('link[rel="canonical"]')?.href || location.href}];
+})()`
+    }
   ],
 };

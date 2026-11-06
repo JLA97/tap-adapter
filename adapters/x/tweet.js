@@ -102,11 +102,14 @@ export default {
   },
   columns: ['authorHandle', 'title', 'text', 'comments', 'url'],
   pipeline: [
-    { navigate: '${{ args.url.replace("/article/", "/status/") }}' },
     {
-      evaluate: `(async () => {
+      "navigate": "${{ args.url }}"
+    },
+    {
+      "evaluate": `(async () => {
         const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-        const requestedUrl = '\${{ args.url }}'.replace('/article/', '/status/');
+        const requestedUrl = \${{ JSON.stringify(args.url) }};
+        if (!/^https:\\/\\/(?:www\\.)?(?:x|twitter)\\.com\\/[^/]+\\/(?:status|article)\\/\\d+/.test(requestedUrl)) throw new Error('X: expected a status or article URL.');
         const clean = value => (value || '').replace(/\\u00a0/g, ' ').replace(/[ \\t]+\\n/g, '\\n').trim();
         const linesOf = value => clean(value).split('\\n').map(line => line.trim()).filter(Boolean);
         const isCount = value => /^(\\d+(?:\\.\\d+)?[KMB]?|\\d+(?:,\\d{3})*)(\\s+(Views|replies|reposts|Likes|Bookmarks))?$/i.test(value);
@@ -122,6 +125,9 @@ export default {
           };
         };
         const articleStatusId = article => {
+          const timestampLink = article.querySelector('a[href*="/status/"] time')?.closest('a');
+          if (timestampLink) return statusId(timestampLink.getAttribute('href'));
+
           const hrefs = [...article.querySelectorAll('a[href*="/status/"]')].map(a => a.href || a.getAttribute('href') || '');
           const direct = hrefs.map(statusId).find(Boolean);
           return direct || '';
@@ -150,9 +156,9 @@ export default {
               authorHandle: user.authorHandle,
               text,
               url: canonicalUrl(user.authorHandle, id, ''),
-              inReplyToTweetId: requestedId,
-              inReplyToAuthorHandle: authorHandle,
-              replyDepth: 1,
+              inReplyToTweetId: '',
+              inReplyToAuthorHandle: '',
+              replyDepth: 0, // Rendered reply order does not establish a direct parent.
             });
           });
         };
@@ -222,6 +228,7 @@ export default {
               '&fieldToggles=' + encodeURIComponent(JSON.stringify(fieldToggles));
             const ct0 = document.cookie.match(/(?:^|; )ct0=([^;]+)/)?.[1] || '';
             const response = await fetch(apiUrl, {
+              signal: AbortSignal.timeout(8000),
               credentials: 'include',
               headers: {
                 authorization: 'Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA',
@@ -244,7 +251,7 @@ export default {
               const rawText = result?.legacy?.full_text || result?.note_tweet?.note_tweet_results?.result?.text || '';
               const text = clean(rawText.replace(/^(@[A-Za-z0-9_]{1,15}\\s+)+/, ''));
               if (!id || id === tweetId || !user?.screen_name || !text || comments.some(comment => comment.tweetId === id)) return;
-              const inReplyToTweetId = legacy.in_reply_to_status_id_str || tweetId;
+              const inReplyToTweetId = legacy.in_reply_to_status_id_str || '';
               comments.push({
                 tweetId: id,
                 authorName: user.name || '',
@@ -253,7 +260,7 @@ export default {
                 url: canonicalUrl(user.screen_name, id, ''),
                 inReplyToTweetId,
                 inReplyToAuthorHandle: legacy.in_reply_to_screen_name || '',
-                replyDepth: inReplyToTweetId === tweetId ? 1 : 2,
+                replyDepth: !inReplyToTweetId ? 0 : inReplyToTweetId === tweetId ? 1 : 2,
               });
             };
             entries.forEach(entry => {
@@ -266,23 +273,79 @@ export default {
           }
         };
 
-        for (let i = 0; i < 40; i++) {
+        const isArticle = /\\/article\\//.test(requestedUrl);
+        // article URL 用 /article/<id>，status URL 用 /status/<id>；statusId 只认 /status/，这里兼容两种
+        const requestedId = statusId(requestedUrl) || (requestedUrl.match(/\\/article\\/(\\d+)/) || [])[1] || '';
+
+        if (isArticle) {
+          // ===== Article 分支：article 本体不在 <article> 标签里，用专用 testid 提取 =====
+          for (let i = 0; i < 24; i++) {
+            if (document.querySelector('[data-testid="twitterArticleReadView"]') &&
+                document.querySelector('[data-testid="twitter-article-title"]')) break;
+            await sleep(500);
+          }
+          const readView = document.querySelector('[data-testid="twitterArticleReadView"]');
+          if (!readView) throw new Error('X Article: reading view missing; check login, availability or page markup.');
+
+          const title = clean(readView.querySelector('[data-testid="twitter-article-title"]')?.innerText || '');
+
+          // 作者 handle：UserAvatar-Container-<handle>
+          const authorAvatar = readView.querySelector('[data-testid^="UserAvatar-Container-"]');
+          const authorHandle = authorAvatar?.getAttribute('data-testid')
+            .replace('UserAvatar-Container-', '') || '';
+
+          // 嵌入推文（article 本体正文里引用的推文）必须从正文和作者查找中剔除
+          const embedded = [...readView.querySelectorAll('article[data-testid="tweet"], [data-testid="simpleTweet"]')];
+          const embeddedSet = new Set(embedded);
+          const inEmbedded = el => { let p = el; while (p) { if (embeddedSet.has(p)) return true; p = p.parentElement; } return false; };
+
+          // 作者名：用 handle 反查 a[href="/<handle>"]，排除嵌入推文，取非 @handle 文本
+          const authorName = authorHandle
+            ? [...readView.querySelectorAll('a[href="/' + authorHandle + '"]')]
+                .filter(a => !inEmbedded(a))
+                .map(a => clean(a.innerText))
+                .find(t => t && t !== '@' + authorHandle) || ''
+            : '';
+
+          // 正文：richView 文本剔除嵌入推文
+          const richView = readView.querySelector('[data-testid="longformRichTextComponent"]') ||
+                           readView.querySelector('[data-testid="twitterArticleRichTextView"]');
+          let bodyText = richView?.innerText || '';
+          embedded.forEach(el => { bodyText = bodyText.replace(el.innerText, ''); });
+          bodyText = clean(bodyText.replace(/\\n{3,}/g, '\\n\\n'));
+
+          if (!title || !bodyText) throw new Error('X Article: title/body missing or still loading.');
+          const tweetId = requestedId;
+          const url = canonicalUrl(authorHandle, tweetId, requestedUrl);
+          const apiComments = await fetchCommentsFromApi(tweetId);
+
+          return [{
+            tweetId,
+            authorName,
+            authorHandle,
+            title,
+            text: bodyText,
+            url,
+            comments: apiComments.slice(0, 10),
+          }];
+        }
+
+        // ===== Status 分支（原有逻辑）=====
+        for (let i = 0; i < 24; i++) {
           const text = document.body.innerText || '';
-          if (text.includes('Conversation') && text.match(/@[A-Za-z0-9_]{1,15}/)) break;
+          if ([...document.querySelectorAll('article[data-testid="tweet"]')].some(article => articleStatusId(article) === requestedId)) break;
           await sleep(500);
         }
 
-        const requestedId = statusId(requestedUrl);
         let mainArticle = [...document.querySelectorAll('article[data-testid="tweet"]')]
-          .find(article => articleStatusId(article) === requestedId) ||
-          document.querySelector('article[data-testid="tweet"]');
-        if (!mainArticle) return [];
+          .find(article => articleStatusId(article) === requestedId);
+        if (!mainArticle) throw new Error('X post: requested post missing; refusing to substitute an unrelated post.');
 
         const mainUser = parseUser(mainArticle);
         const mainTweetTexts = [...mainArticle.querySelectorAll('[data-testid="tweetText"]')].map(el => clean(el.innerText)).filter(Boolean);
         const lines = linesOf(mainArticle.innerText);
         const handleIndex = lines.findIndex(line => /^@[A-Za-z0-9_]{1,15}$/.test(line));
-        if (handleIndex < 1) return [];
+        if (handleIndex < 1) throw new Error('X post: author metadata missing.');
 
         const authorHandle = mainUser.authorHandle || lines[handleIndex].slice(1);
         const authorName = mainUser.authorName || lines[handleIndex - 1];
@@ -305,7 +368,7 @@ export default {
         const commentsById = new Map();
         if (!apiComments.length) {
           collectComments(tweetId, commentsById);
-          const commentLoadDeadline = Date.now() + 15000;
+          const commentLoadDeadline = Date.now() + 7000;
           for (let i = 0; i < 40 && commentsById.size < 10 && Date.now() < commentLoadDeadline; i++) {
             window.scrollBy(0, Math.max(900, Math.floor(window.innerHeight * 0.85)));
             await sleep(350);
@@ -313,16 +376,18 @@ export default {
           }
         }
 
+        const mainText = mainTweetTexts.length ? clean(mainTweetTexts.join('\\n')) : clean(bodyLines.join('\\n'));
+        if (!mainText) throw new Error('X post: requested post body missing.');
         return [{
           tweetId,
           authorName,
           authorHandle,
           title,
-          text: mainTweetTexts.length ? clean(mainTweetTexts.join('\\n')) : clean(bodyLines.join('\\n')),
+          text: mainText,
           url,
           comments: apiComments.length ? apiComments : [...commentsById.values()].slice(0, 10),
         }];
-      })()`,
-    },
+      })()`
+    }
   ],
 };

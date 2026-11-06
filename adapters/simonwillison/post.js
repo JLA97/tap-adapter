@@ -22,51 +22,28 @@ export default {
     { description: 'Fetch an article', args: { url: 'https://simonwillison.net/2026/May/7/xai-anthropic/' } },
   ],
   pipeline: [
-    { navigate: '${{ args.url }}' },
-    { evaluate: `(() => {
-      const entry = document.querySelector('.entry.entryPage');
-      if (!entry) return [];
-
-      const ogTitle = document.querySelector('meta[property="og:title"]')?.getAttribute('content') || '';
-      const dateEl = entry.querySelector('.mobile-date, .mobile-date-eyebrow');
-      const tags = Array.from(document.querySelectorAll('a[rel="tag"]')).map(t =>
-        t.textContent.trim().split('\\n')[0].trim()
-      );
-
-      const quoteDiv = entry.querySelector('.quote');
-      const type = quoteDiv ? 'quote' : 'article';
-
-      let content = '';
-      let sourceUrl = '';
-
-      if (type === 'quote') {
-        const blockquote = quoteDiv.querySelector('blockquote');
-        const citeEl = quoteDiv.querySelector('.cite');
-        const quoteText = blockquote ? blockquote.textContent.trim() : '';
-        const citeText = citeEl ? citeEl.textContent.trim() : '';
-        content = quoteText + (citeText ? '\\n\\n' + citeText : '');
-        sourceUrl = blockquote?.getAttribute('cite') || '';
-      } else {
-        const contentDiv = entry.children[0];
-        const parts = [];
-        for (const child of contentDiv.children) {
-          if (child.tagName === 'H2') continue;
-          if (child.classList.contains('mobile-date') || child.classList.contains('mobile-date-eyebrow')) continue;
-          const text = child.textContent.trim();
-          if (text) parts.push(text);
-        }
-        content = parts.join('\\n\\n');
-      }
-
-      return [{
-        title: ogTitle,
-        url: window.location.href,
-        date: dateEl ? dateEl.textContent.trim() : '',
-        type,
-        content,
-        sourceUrl,
-        tags,
-      }];
-    })()` },
+    {
+      "navigate": "${{ args.url }}"
+    },
+    {
+      "evaluate": `(() => {
+  const entry = document.querySelector('.entry.entryPage');
+  if (!entry) throw new Error('Simon post: entry missing; check the URL or page markup.');
+  const title = document.querySelector('meta[property="og:title"]')?.getAttribute('content') || entry.querySelector('h2, h1, .beat-title')?.textContent.trim() || '';
+  const date = entry.querySelector('.mobile-date, .mobile-date-eyebrow')?.textContent.trim() || '';
+  const tags = [...new Set([...document.querySelectorAll('a[rel="tag"]')].map(x => x.textContent.trim().split('\\n')[0].trim()))];
+  const quote = entry.querySelector('.quote');
+  const sourceUrl = quote?.querySelector('blockquote')?.getAttribute('cite') || quote?.querySelector('.cite a[href]')?.href || '';
+  // Dates can be the first child; release, link-blog and quote bodies are siblings.
+  const copy = entry.cloneNode(true);
+  for (const el of copy.querySelectorAll('.mobile-date, .mobile-date-eyebrow, .entryFooter, .edit-page-link, script, style')) el.remove();
+  const heading = copy.querySelector('h2, h1');
+  if (heading?.textContent.trim() === title) heading.remove();
+  const content = [...copy.children].map(x => (x.innerText || x.textContent || '').trim()).filter(Boolean).join('\\n\\n');
+  if (!title || !date || !content) throw new Error('Simon post: title, date or body missing: ' + location.href);
+  return [{title,url:document.querySelector('link[rel="canonical"]')?.href || location.href,date,type:quote?'quote':'article',content,sourceUrl,tags}];
+})()
+`
+    }
   ],
 };

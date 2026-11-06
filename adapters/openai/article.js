@@ -37,55 +37,39 @@ export default {
   },
   columns: ['title', 'date', 'category'],
   pipeline: [
-    { navigate: '${{ args.url }}' },
-    { evaluate: `(() => {
-      const main = document.querySelector('main');
-      if (!main) return [{}];
-
-      const title = main.querySelector('h1')?.textContent?.trim() || '';
-
-      const dateEl = Array.from(main.querySelectorAll('p.text-meta')).find(p =>
-        /^[A-Z][a-z]+ \\d{1,2}, \\d{4}$/.test(p.textContent.trim())
-      );
-      const date = dateEl?.textContent?.trim() || '';
-
-      const catLink = main.querySelector('a[href*="/news/"]');
-      const category = catLink?.textContent?.trim() || '';
-
-      const url = document.querySelector('meta[property="og:url"]')?.getAttribute('content') || location.href;
-
-      const bodyParts = [];
-      for (const el of main.querySelectorAll('p, h2, h3')) {
-        if (el.textContent.trim() === 'Keep reading') break;
-        const text = el.textContent?.trim();
-        if (!text) continue;
-        if (text === 'Listen to article' || text === 'Share' || /^\\d+:\\d+$/.test(text)) continue;
-        if (/^[A-Z][a-z]+ \\d{1,2}, \\d{4}$/.test(text)) continue;
-        if (el.tagName === 'P' && el.classList.contains('text-meta')) continue;
-        if (el.querySelector('a[href*="/news/"]') && text.length < 20) continue;
-
-        if (el.tagName === 'H2' || el.tagName === 'H3') {
-          bodyParts.push('\\n' + '#'.repeat(parseInt(el.tagName[1])) + ' ' + text + '\\n');
-        } else {
-          bodyParts.push(text);
-        }
-      }
-
-      return [{
-        title,
-        date,
-        category,
-        url,
-        content: bodyParts.join('\\n\\n').trim(),
-      }];
-    })()` },
-    { map: {
-      title:    '${{ item.title }}',
-      date:     '${{ item.date }}',
-      category: '${{ item.category }}',
-      url:      '${{ item.url }}',
-      content:  '${{ item.content }}',
-    }},
-    { limit: 1 },
+    {
+      "navigate": "${{ args.url }}"
+    },
+    {
+      "evaluate": `(() => {
+  const main = document.querySelector('main');
+  if (!main) throw new Error('OpenAI article: main content missing: '+location.href);
+  const title = main.querySelector('h1')?.textContent.trim() || '';
+  const date = document.querySelector('meta[property="article:published_time"]')?.getAttribute('content') || [...main.querySelectorAll('p.text-meta')].find(x=>/^[A-Z][a-z]+ \\d{1,2}, \\d{4}$/.test(x.textContent.trim()))?.textContent.trim() || main.querySelector('header time')?.getAttribute('datetime') || '';
+  const category = main.querySelector('a[href*="/news/"]')?.textContent.trim() || '';
+  const url = document.querySelector('link[rel="canonical"]')?.href || document.querySelector('meta[property="og:url"]')?.getAttribute('content') || location.href;
+  const parts=[];let stopped=false;
+  const visit = el => {
+    if(stopped)return;
+    const tag=el.tagName, text=el.textContent.trim();
+    if(text==='Keep reading'){stopped=true;return;}
+    if(['SCRIPT','STYLE','NAV','ASIDE','BUTTON','HEADER','H1'].includes(tag)||el.hidden||el.getAttribute('aria-hidden')==='true')return;
+    if(el.matches('.text-meta'))return;
+    if(/^H[2-6]$/.test(tag)){if(text)parts.push('#'.repeat(Number(tag[1]))+' '+text);}
+    else if(tag==='P'){if(text&&!/^(Listen to article|Share)$/.test(text))parts.push(text);}
+    else if(tag==='PRE'){if(text)parts.push(String.fromCharCode(96).repeat(3)+'\\n'+text+'\\n'+String.fromCharCode(96).repeat(3));}
+    else if(tag==='UL'||tag==='OL')parts.push([...el.children].filter(x=>x.tagName==='LI').map((x,i)=>(tag==='OL'?(i+1)+'. ':'- ')+x.textContent.trim()).join('\\n'));
+    else if(tag==='BLOCKQUOTE'){if(text)parts.push('> '+text);}
+    else if(tag==='TABLE'){for(const row of el.querySelectorAll('tr'))parts.push('| '+[...row.querySelectorAll('th,td')].map(x=>x.textContent.trim()).join(' | ')+' |');}
+    else for(const child of el.children)visit(child);
+  };
+  const roots=[...main.querySelectorAll('[data-toc-content]')].filter(x=>!x.parentElement.closest('[data-toc-content]'));
+  for(const root of roots.length?roots:[main])visit(root);
+  const content=parts.filter(Boolean).join('\\n\\n');
+  if(!title||!date||!Number.isFinite(Date.parse(date))||!content)throw new Error('OpenAI article: title, publication date or body missing: '+location.href);
+  return [{title,date,category,url,content}];
+})()
+`
+    }
   ],
 };

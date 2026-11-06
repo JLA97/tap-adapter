@@ -42,48 +42,28 @@ export default {
   },
   columns: ['title', 'author', 'publishedDate', 'sourceTitle', 'bodyText'],
   pipeline: [
-    { navigate: '${{ args.url }}' },
-    { evaluate: `(() => {
-        const article = document.querySelector('article');
-        if (!article) return [];
-
-        const metaDiv = article.children[1];
-        const title = metaDiv.querySelector('h1')?.textContent?.trim() || '';
-
-        const times = metaDiv.querySelectorAll('time');
-        const publishedDate = times[0]?.getAttribute('datetime') || '';
-        const translatedDate = times[1]?.getAttribute('datetime') || '';
-
-        const sourceLink = metaDiv.querySelector('a[href*="x.com"], a[href*="twitter.com"]');
-        const sourceUrl = sourceLink?.href || '';
-        const sourceTitle = sourceLink?.textContent?.trim() || '';
-
-        const authorMatch = metaDiv.textContent.match(/作者[：:]\\s*(.+)/);
-        const author = authorMatch ? authorMatch[1].trim() : '';
-
-        const proseDiv = article.querySelector('.prose');
-        const bodyText = proseDiv?.textContent?.trim() || '';
-
-        return [{
-          title,
-          author,
-          publishedDate,
-          translatedDate,
-          sourceUrl,
-          sourceTitle,
-          bodyText,
-        }];
-      })()` },
-    { map: {
-      title: '${{ item.title }}',
-      author: '${{ item.author }}',
-      publishedDate: '${{ item.publishedDate }}',
-      translatedDate: '${{ item.translatedDate }}',
-      sourceUrl: '${{ item.sourceUrl }}',
-      sourceTitle: '${{ item.sourceTitle }}',
-      bodyText: '${{ item.bodyText }}',
-    }},
-    { limit: 1 },
+    {
+      "navigate": "${{ args.url }}"
+    },
+    {
+      "evaluate": `(() => {
+  const article = document.querySelector('article'), heading = article?.querySelector('h1');
+  const prose = article?.querySelector('.prose');
+  if (!heading || !prose) throw new Error('Baoyu article: title/body missing: '+location.href);
+  const header = heading.parentElement;
+  const times = header.querySelectorAll('time');
+  const publishedDate = times[0]?.getAttribute('datetime') || article.querySelector('time')?.getAttribute('datetime') || '';
+  const translatedDate = times[1]?.getAttribute('datetime') || '';
+  const sourceRow = [...header.querySelectorAll('span')].find(x=>/^(原文|Original)([：:]|$)/i.test(x.textContent.trim()))?.parentElement;
+  const sourceLink = sourceRow?.querySelector('a[href]');
+  const authorLabel = [...header.querySelectorAll('span')].find(x=>/^(作者|Author)[：:]?$/i.test(x.textContent.trim()));
+  const author = authorLabel?.nextElementSibling?.textContent.trim() || '';
+  const bodyText = (prose.innerText || prose.textContent || '').trim();
+  if (!publishedDate || !Number.isFinite(Date.parse(publishedDate)) || !bodyText) throw new Error('Baoyu article: publication date/body invalid: '+location.href);
+  return [{title:heading.textContent.trim(),author,publishedDate,translatedDate,sourceUrl:sourceLink?.href||'',sourceTitle:sourceLink?.textContent.trim()||'',bodyText}];
+})()
+`
+    }
   ],
   examples: [
     { description: 'Fetch an article by URL', args: { url: 'https://baoyu.io/translations/2026-05-10/championswimmer-2051807284691612099' } },

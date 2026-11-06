@@ -36,9 +36,11 @@ export default {
     { description: 'Fetch a WeChat article by URL', args: { url: 'https://mp.weixin.qq.com/s/GhTOhZO_zj8NfR1vPmPVww' } },
   ],
   pipeline: [
-    { navigate: '${{ args.url }}' },
     {
-      evaluate: `(async () => {
+      "navigate": "${{ args.url }}"
+    },
+    {
+      "evaluate": `(async () => {
         const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
         window.scrollTo(0, document.body.scrollHeight);
         await sleep(800);
@@ -54,26 +56,20 @@ export default {
           .trim();
 
         const content = document.querySelector('#js_content, .rich_media_content');
-        if (!content) return [];
+        if (!content) throw new Error('WeChat article: body missing; the article may be removed or require verification: ' + location.href);
 
         const title = text('#activity-name') || attr('meta[property="og:title"]', 'content') || document.title.replace(/\\s*$/, '');
         const canonical = document.querySelector('link[rel="canonical"]')?.href || window.location.href;
 
+        const bodyText = clean(content.innerText || content.textContent || '');
+        if (!title || !bodyText) throw new Error('WeChat article: title or rendered body is empty: ' + location.href);
         return [{
           title,
           author: text('#js_name'),
           url: canonical,
-          bodyText: clean(content.innerText || content.textContent || ''),
+          bodyText,
         }];
-      })()` },
-    {
-      map: {
-        title: '${{ item.title }}',
-        author: '${{ item.author }}',
-        url: '${{ item.url }}',
-        bodyText: '${{ item.bodyText }}',
-      },
-    },
-    { limit: 1 },
+      })()`
+    }
   ],
 };

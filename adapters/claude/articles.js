@@ -35,8 +35,11 @@ export default {
   },
   columns: ['title', 'publishedDate', 'category', 'summary'],
   pipeline: [
-    { navigate: 'https://claude.com/resources/articles' },
-    { evaluate: `
+    {
+      "navigate": "https://claude.com/resources/articles"
+    },
+    {
+      "evaluate": `
 (async () => {
   const days = Number(\${{ args.days }});
   const limit = Number(\${{ args.limit }});
@@ -65,10 +68,32 @@ export default {
   // Keep local articles: the new index also syndicates external news/dev posts.
   const selected = [];
   const seen = new Set();
+  // Featured cards are excluded from the category API; merge them before filtering.
+  const byUrl = new Map();
+  const cards = [...document.querySelectorAll('a[class*="ResourceCard"][href]')];
+  if (!cards.length) throw new Error('Claude articles: resource cards missing; listing markup changed.');
+  for (const card of cards) {
+    const title = card.querySelector('h3')?.textContent.trim();
+    const dateText = [...card.querySelectorAll('span, time')].map(x => x.textContent.trim())
+      .find(x => /^[A-Z][a-z]{2} \\d{1,2}, \\d{4}$/.test(x));
+    if (!title || !dateText) throw new Error('Claude articles: card title/date missing.');
+    const ts = Date.parse(dateText + ' 00:00:00 GMT');
+    const url = new URL(card.getAttribute('href'), location.origin).href;
+    if (!Number.isFinite(ts)) throw new Error('Claude articles: invalid card date: ' + dateText);
+    if (ts >= cutoff && ts <= end) byUrl.set(url, {
+      title, publishedDate: dateFormat.format(new Date(ts)), category: '', url,
+      excerpt: card.querySelector('p')?.textContent.trim() || '',
+    });
+  }
   let loaded = 0;
   let previousDate = Infinity;
   for (let page = 1; ; page++) {
-    const response = await fetch('/api/resources/category?page=' + page + '&language=en&type=articles');
+    const listingUrl = '/api/resources/category?page=' + page + '&language=en&type=articles';
+    let response;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try { response = await fetch(listingUrl, { signal: AbortSignal.timeout(10000) }); break; }
+      catch (error) { if (attempt === 1) throw new Error('Claude articles: listing request failed: ' + listingUrl + ': ' + error.message); }
+    }
     if (!response.ok) throw new Error('Claude articles: listing HTTP ' + response.status + ' on page ' + page);
     const data = await response.json();
     if (!Array.isArray(data.items) || !Number.isInteger(data.total) || data.total < 0) {
@@ -89,8 +114,8 @@ export default {
       if (seen.has(item._id)) continue;
       seen.add(item._id);
       added++;
-      if (item.externalUrl) continue;
-      if (typeof item.slug !== 'string' || !item.slug) {
+
+      if (!item.externalUrl && (typeof item.slug !== 'string' || !item.slug)) {
         throw new Error('Claude articles: local article has no slug: ' + item.title);
       }
       if (ts >= cutoff && ts <= end) {
@@ -98,36 +123,64 @@ export default {
           title: item.title.trim(),
           publishedDate: dateFormat.format(new Date(ts)),
           category: item.category?.name || '',
-          url: 'https://claude.com/resources/articles/' + encodeURIComponent(item.slug),
+          url: item.externalUrl || 'https://claude.com/resources/articles/' + encodeURIComponent(item.slug),
+          excerpt: item.excerpt || '',
         });
       }
     }
     loaded += data.items.length;
     if (!added) throw new Error('Claude articles: pagination repeated a page.');
-    if (selected.length >= limit || previousDate < cutoff || loaded >= data.total) break;
+    if (previousDate < cutoff || loaded >= data.total) break;
   }
 
   // Do not turn HTTP errors or changed body markup into an empty successful week.
-  const result = [];
-  const articles = selected.slice(0, limit);
-  for (let offset = 0; offset < articles.length; offset += 4) {
-    const batch = await Promise.all(articles.slice(offset, offset + 4).map(async (article) => {
-      const response = await fetch(article.url);
-      if (!response.ok) throw new Error('Claude articles: article HTTP ' + response.status + ': ' + article.url);
-      const doc = new DOMParser().parseFromString(await response.text(), 'text/html');
-      const rich = doc.querySelector('.text-rich-text--article, .u-rich-text-blog');
-      const title = doc.querySelector('h1')?.textContent.trim();
-      if (!rich || !title) throw new Error('Claude articles: article body/title missing: ' + article.url);
-      const paragraph = [...rich.querySelectorAll('p')].map(p => p.textContent.trim()).find(text =>
-        text.length > 40 && !/^(Thank|Oops|Try Claude|Download|Read more)/.test(text)
-        && !text.includes('submission has been received'));
-      if (!paragraph) throw new Error('Claude articles: substantive paragraph missing: ' + article.url);
-      return { ...article, title, summary: paragraph.slice(0, 300) + (paragraph.length > 300 ? '...' : '') };
-    }));
-    result.push(...batch);
+  for (const item of selected) byUrl.set(item.url, { ...byUrl.get(item.url), ...item });
+  const articles = [...byUrl.values()].sort((a, b) => Date.parse(b.publishedDate) - Date.parse(a.publishedDate));
+  if (articles.length > limit) throw new Error('Claude articles: ' + articles.length + ' matches exceed limit ' + limit + '; rerun with --limit ' + articles.length + ' to avoid an incomplete date window.');
+  return articles;
+})()`
+    },
+    {
+      "foreach": {
+        "as": "articles",
+        "concurrency": 4,
+        "steps": [
+          {
+            "evaluate": `(async () => {
+  const article = \${{ JSON.stringify(item) }};
+  const {excerpt, ...fields} = article;
+  if (new URL(article.url).origin !== location.origin) {
+    if (!excerpt) throw new Error('Claude articles: external article summary missing: ' + article.url);
+    return { ...fields, summary: excerpt.slice(0, 300) };
   }
-  return result;
-})()
-    ` },
+  let response;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      response = await fetch(article.url, { signal: AbortSignal.timeout(10000) });
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      break;
+    } catch (error) {
+      if (attempt === 1) throw new Error('Claude articles: article request failed: ' + article.url + ': ' + error.message);
+    }
+  }
+  const doc = new DOMParser().parseFromString(await response.text(), 'text/html');
+  const rich = doc.querySelector('.text-rich-text--article, .u-rich-text-blog');
+  const title = doc.querySelector('h1')?.textContent.trim();
+  if (!rich || !title) throw new Error('Claude articles: article body/title missing: ' + article.url);
+  const paragraph = [...rich.querySelectorAll('p')].map(p => p.textContent.trim()).find(text =>
+    text.length > 40 && !/^(Thank|Oops|Try Claude|Download|Read more)/.test(text)
+    && !text.includes('submission has been received'));
+  if (!paragraph) throw new Error('Claude articles: substantive paragraph missing: ' + article.url);
+  return { ...fields, title, summary: paragraph.slice(0, 300) + (paragraph.length > 300 ? '...' : '') };
+})()`
+          }
+        ]
+      }
+    },
+    {
+      "select": {
+        "from": "articles"
+      }
+    }
   ],
 };

@@ -116,18 +116,21 @@ export default {
   ],
   pipeline: [
     {
-      navigate: 'https://www.reddit.com',
+      "navigate": "https://www.reddit.com"
     },
     {
-      evaluate: `(async () => {
-        const inputUrl = '\${{ args.url }}'.trim();
-        const commentLimit = Number('\${{ args.commentLimit }}') || 20;
-        const depth = Number('\${{ args.depth }}') || 10;
+      "evaluate": `(async () => {
+        const inputUrl = \${{ JSON.stringify(args.url) }}.trim();
+        const commentLimit = Number(\${{ args.commentLimit }});
+        const depth = Number(\${{ args.depth }});
+        if (!Number.isInteger(commentLimit) || commentLimit < 0 || !Number.isInteger(depth) || depth < 0) throw new Error('Reddit thread: invalid commentLimit/depth.');
+        if (!/^https:\\/\\/(?:www\\.|old\\.|new\\.)?reddit\\.com\\/r\\/[^/]+\\/comments\\/[^/]+/.test(inputUrl)) throw new Error('Reddit thread: expected a Reddit post URL.');
         const requestLimit = Math.max(commentLimit * 10, 100);
         const cleanInput = inputUrl.split('?')[0].split('#')[0].replace(/\\/+$/, '').replace(/\\.json$/, '');
         const jsonUrl = cleanInput + '/.json?limit=' + encodeURIComponent(requestLimit) + '&depth=' + encodeURIComponent(depth);
 
         const response = await fetch(jsonUrl, {
+          signal: AbortSignal.timeout(12000),
           credentials: 'include',
           headers: {
             Accept: 'application/json',
@@ -140,7 +143,7 @@ export default {
 
         const payload = await response.json();
         const post = payload?.[0]?.data?.children?.[0]?.data;
-        if (!post) {
+        if (!post?.id || !post?.title || !Array.isArray(payload?.[1]?.data?.children)) {
           throw new Error('Reddit thread JSON did not contain a post at [0].data.children[0].data.');
         }
 
@@ -188,8 +191,10 @@ export default {
           url: normalizePermalink(post.permalink || inputUrl),
           comments,
         }];
-      })()`,
+      })()`
     },
-    { limit: 1 },
+    {
+      "limit": 1
+    }
   ],
 };

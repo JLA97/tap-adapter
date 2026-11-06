@@ -16,37 +16,40 @@ export default {
   },
   columns: ['title', 'url', 'published', 'summary'],
   pipeline: [
-    { navigate: 'https://simonwillison.net/atom/everything/' },
-    { evaluate: `
-        (() => {
-          const entries = Array.from(document.querySelectorAll('entry'));
-          return entries.map(e => {
-            const link =
-              e.querySelector('link[rel="alternate"]')?.getAttribute('href') ||
-              e.querySelector('link')?.getAttribute('href') || '';
-            const rawSummary = e.querySelector('summary')?.textContent || '';
-            const summary = rawSummary
-              .replace(/<[^>]+>/g, ' ')
-              .replace(/&#?[a-z0-9]+;/gi, ' ')
-              .replace(/\\s+/g, ' ')
-              .trim()
-              .slice(0, 800);
-            return {
-              title:     e.querySelector('title')?.textContent?.trim(),
-              url:       link.replace(/#.*$/, ''),
-              published: e.querySelector('published')?.textContent?.trim(),
-              summary,
-            };
-          });
-        })()
-      ` },
-    { map: {
-      title:     '${{ item.title }}',
-      url:       '${{ item.url }}',
-      published: '${{ item.published }}',
-      summary:   '${{ item.summary }}',
-    }},
-    { filter: 'new Date(item.published) >= new Date(Date.now() - args.days * 86400000)' },
-    { limit: '${{ args.limit }}' },
+    {
+      "navigate": "https://simonwillison.net/atom/everything/"
+    },
+    {
+      "evaluate": `(() => {
+  const days = Number(\${{ args.days }}), limit = Number(\${{ args.limit }});
+  if (!Number.isInteger(days) || days < 1 || !Number.isInteger(limit) || limit < 0) throw new Error('Simon articles: invalid days or limit.');
+  if (!limit) return [];
+  const entries = [...document.querySelectorAll('feed entry')];
+  if (!entries.length || document.querySelector('parsererror')) throw new Error('Simon articles: Atom feed missing or malformed.');
+  const cutoff = Date.now() - days * 86400000;
+  let oldest = Infinity;
+  const results = new Map();
+  for (const entry of entries) {
+    const published = entry.querySelector('published')?.textContent.trim() || entry.querySelector('updated')?.textContent.trim();
+    const timestamp = Date.parse(published);
+    if (!Number.isFinite(timestamp)) throw new Error('Simon articles: publication date missing or invalid.');
+    oldest = Math.min(oldest, timestamp);
+    if (timestamp < cutoff || timestamp > Date.now()) continue;
+    const title = entry.querySelector('title')?.textContent.trim();
+    const href = entry.querySelector('link[rel="alternate"]')?.getAttribute('href') || entry.querySelector('link')?.getAttribute('href');
+    if (!title || !href) throw new Error('Simon articles: entry title/URL missing.');
+    const url = new URL(href, 'https://simonwillison.net'); url.hash = '';
+    const raw = entry.querySelector('summary')?.textContent || entry.querySelector('content')?.textContent || '';
+    const html = new DOMParser().parseFromString('<html><body>'+raw+'</body></html>', 'text/html');
+    const summary = html.body.textContent.replace(/\\s+/g,' ').trim().slice(0,800);
+    results.set(url.href,{title,url:url.href,published,summary});
+  }
+  if (oldest > cutoff) throw new Error('Simon articles: the finite Atom feed starts at ' + new Date(oldest).toISOString() + ' and cannot cover --days ' + days + '; use a shorter window or the site archive.');
+  const items = [...results.values()].sort((a,b)=>Date.parse(b.published)-Date.parse(a.published));
+  if (items.length > limit) throw new Error('Simon articles: '+items.length+' matches exceed limit; rerun with --limit '+items.length+'.');
+  return items;
+})()
+`
+    }
   ],
 };

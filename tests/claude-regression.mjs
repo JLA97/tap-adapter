@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
+import { DOMParser as HTMLParser } from 'linkedom';
 import articles from '../adapters/claude/articles.js';
 import post from '../adapters/claude/post.js';
 
@@ -22,7 +23,9 @@ async function run({ pages = [{ items: [article('cresta')], total: 1 }], limit =
   class Clock extends Date { static now() { return Date.parse(now); } }
   const code = articles.pipeline.find(step => step.evaluate).evaluate
     .replace('${{ args.limit }}', JSON.stringify(limit)).replace('${{ args.days }}', JSON.stringify(days));
-  const items = await vm.runInNewContext(code, {
+  const context = {
+    document: new HTMLParser().parseFromString('<main><a class="ResourceCard" href="/resources/articles/old"><span>Jan 1, 2026</span><h3>Old</h3></a></main>', 'text/html'),
+    location: { origin: 'https://claude.com' }, URL, AbortSignal,
     Date: Clock, Intl, DOMParser: class { parseFromString() { return doc; } },
     fetch: async url => {
       calls.push(url);
@@ -33,7 +36,10 @@ async function run({ pages = [{ items: [article('cresta')], total: 1 }], limit =
       }
       return { ok: detailStatus === 200, status: detailStatus, text: async () => '<fixture>' };
     },
-  });
+  };
+  const rows = await vm.runInNewContext(code, context);
+  const detail = articles.pipeline.find(step => step.foreach).foreach.steps[0].evaluate;
+  const items = await Promise.all(rows.map(item => vm.runInNewContext(detail.replace('${{ JSON.stringify(item) }}', JSON.stringify(item)), context)));
   return { items: JSON.parse(JSON.stringify(items)), calls };
 }
 
@@ -46,12 +52,12 @@ test('Cresta is included in the original Friday weekly window with complete outp
   assert.deepEqual(Object.keys(items[0]).sort(), Object.keys(articles.output.fields).sort());
 });
 
-test('pagination fills the limit despite external posts and skips external detail requests', async () => {
-  const { items, calls } = await run({ limit: 3, pages: [
-    { items: [article('a', '2026-10-08'), article('external', '2026-10-07', 'https://example.com/post')], total: 4 },
+test('pagination includes listed external posts without requesting their remote details', async () => {
+  const { items, calls } = await run({ limit: 4, pages: [
+    { items: [article('a', '2026-10-08'), { ...article('external', '2026-10-07', 'https://example.com/post'), excerpt: paragraph }], total: 4 },
     { items: [article('b', '2026-10-06'), article('cresta')], total: 4 },
   ] });
-  assert.equal(items.length, 3);
+  assert.equal(items.length, 4);
   assert.equal(calls.filter(url => url.startsWith('/api/')).length, 2);
   assert.ok(!calls.some(url => url.includes('example.com')));
 });
@@ -82,7 +88,7 @@ test('repeated pages or changed sort order fail instead of silently truncating',
 });
 
 test('article HTTP errors and missing body fail instead of being discarded', async () => {
-  await assert.rejects(run({ detailStatus: 403 }), /article HTTP 403/);
+  await assert.rejects(run({ detailStatus: 403 }), /article request failed:.*HTTP 403/);
   await assert.rejects(run({ doc: { querySelector: () => null } }), /body\/title missing/);
 });
 

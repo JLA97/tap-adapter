@@ -38,8 +38,11 @@ export default {
     { description: 'Fetch a Claude Code blog post', args: { url: 'https://claude.com/blog/claude-code-best-practices' } },
   ],
   pipeline: [
-    { navigate: '${{ args.url }}' },
-    { evaluate: `
+    {
+      "navigate": "${{ args.url }}"
+    },
+    {
+      "evaluate": `
 (() => {
   const title = document.querySelector('h1')?.textContent.trim() || '';
   const nodes = [];
@@ -79,6 +82,8 @@ export default {
     const text = element.textContent.trim();
     if (/^H[2-4]$/.test(tag)) {
       if (text) parts.push('#'.repeat(Number(tag[1])) + ' ' + text);
+    } else if (tag === 'PRE') {
+      if (text) parts.push(String.fromCharCode(96).repeat(3) + '\\n' + text + '\\n' + String.fromCharCode(96).repeat(3));
     } else if (tag === 'P') {
       if (text) parts.push(text);
     } else if (tag === 'UL' || tag === 'OL') {
@@ -101,6 +106,7 @@ export default {
   }
   return [{ title, publishedDate, category, content, url: location.href }];
 })()
-    ` },
+    `
+    }
   ],
 };
