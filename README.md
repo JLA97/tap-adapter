@@ -30,9 +30,11 @@ Claude and OpenAI date-window queries fail with a suggested larger `--limit`
 if matches exceed the cap, instead of silently returning an incomplete week.
 Malformed pages/feeds, missing publication metadata, incomplete pagination,
 and article retrieval errors fail the command rather than masquerading as an
-empty week. Claude detail requests retry transient failures once. List and
-individual detail extraction run in separate pipeline steps so a large batch
-is not confined to one browser evaluation timeout.
+empty week. Claude retries listing and detail requests once, including failures
+while reading the response body. On resource pages, the adapter reads through
+the closing article tag and extracts the summary without waiting for the rest
+of the page. List and individual detail extraction run in separate pipeline
+steps.
 
 `tap claude post --url <article-url>` supports redirected legacy URLs and new
 resource URLs. `tap anthropic article --url <article-url>` supports the current

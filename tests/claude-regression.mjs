@@ -18,23 +18,23 @@ const fixtureDoc = {
 
 async function run({ pages = [{ items: [article('cresta')], total: 1 }], limit = 20, days = 6,
   now = '2026-10-09T22:00:00+08:00', listingStatus = 200, detailStatus = 200,
-  doc = fixtureDoc } = {}) {
+  doc = fixtureDoc, readListing = async payload => payload } = {}) {
   const calls = [];
   class Clock extends Date { static now() { return Date.parse(now); } }
   const code = articles.pipeline.find(step => step.evaluate).evaluate
     .replace('${{ args.limit }}', JSON.stringify(limit)).replace('${{ args.days }}', JSON.stringify(days));
   const context = {
     document: new HTMLParser().parseFromString('<main><a class="ResourceCard" href="/resources/articles/old"><span>Jan 1, 2026</span><h3>Old</h3></a></main>', 'text/html'),
-    location: { origin: 'https://claude.com' }, URL, AbortSignal,
+    location: { origin: 'https://claude.com' }, URL, AbortSignal, TextDecoderStream,
     Date: Clock, Intl, DOMParser: class { parseFromString() { return doc; } },
     fetch: async url => {
       calls.push(url);
       if (url.startsWith('/api/')) {
         const page = Number(new URL(url, 'https://claude.com').searchParams.get('page'));
         const payload = pages[Math.min(page - 1, pages.length - 1)];
-        return { ok: listingStatus === 200, status: listingStatus, json: async () => payload };
+        return { ok: listingStatus === 200, status: listingStatus, json: () => readListing(payload) };
       }
-      return { ok: detailStatus === 200, status: detailStatus, text: async () => '<fixture>' };
+      return new Response('<fixture>', { status: detailStatus });
     },
   };
   const rows = await vm.runInNewContext(code, context);
@@ -80,6 +80,20 @@ test('listing HTTP errors and schema changes fail instead of returning a false e
   await assert.rejects(run({ pages: [{ changedItems: [], total: 1 }] }), /unexpected listing schema/);
   await assert.rejects(run({ pages: [{ items: [], total: 1 }] }), /pagination ended/);
   await assert.rejects(run({ pages: [{ items: [article('bad', '2026-02-30')], total: 1 }] }), /invalid publication date/);
+});
+
+test('retries a listing body error and identifies the failing page', async () => {
+  let attempts = 0;
+  const failOnce = async payload => {
+    if (++attempts === 1) throw new Error('listing body timed out');
+    return payload;
+  };
+  const { items } = await run({ readListing: failOnce });
+  assert.equal(items.length, 1);
+  assert.equal(attempts, 2);
+  await assert.rejects(run({
+    readListing: async () => { throw new Error('listing body timed out'); },
+  }), /listing request failed: .*page=1.*listing body timed out/);
 });
 
 test('repeated pages or changed sort order fail instead of silently truncating', async () => {
@@ -132,4 +146,74 @@ test('post supports metadata labels without JSON-LD and rejects a missing body',
   assert.equal(item.publishedDate, 'October 5, 2026');
   context.document = postDoc({ body: false });
   assert.throws(() => vm.runInNewContext(post.pipeline.find(step => step.evaluate).evaluate, context), /could not be parsed/);
+});
+
+const worker = articles.pipeline.find(step => step.foreach).foreach.steps[0].evaluate;
+const detailItem = {
+  title: 'Listed title', publishedDate: 'November 13, 2026', category: '',
+  url: 'https://claude.com/resources/articles/building-always-on-agents', excerpt: '',
+};
+function readDetail(fetch) {
+  const detail = worker.replace('${{ JSON.stringify(item) }}', JSON.stringify(detailItem));
+  return vm.runInNewContext(detail, {
+    DOMParser: HTMLParser, URL, AbortSignal, TextDecoderStream, fetch,
+    location: { origin: 'https://claude.com' },
+  });
+}
+
+test('reads the complete article when the hydration payload stalls', async () => {
+  const summary = 'An article with enough text to use as a summary and an em dash—split across chunks.';
+  const html = '<main><article><h1>Article title</h1><div class="text-rich-text--article"><p>' +
+    summary + '</p></div></article>';
+  const bytes = new TextEncoder().encode(html);
+  const dash = bytes.indexOf(0xe2);
+  let cancelled = false;
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(bytes.slice(0, dash + 1));
+      controller.enqueue(bytes.slice(dash + 1, -4));
+      controller.enqueue(bytes.slice(-4));
+      // The upstream stream stays open after the article's closing tag.
+    },
+    cancel() { cancelled = true; },
+  });
+  const result = await readDetail(async () => new Response(body));
+  assert.equal(result.title, 'Article title');
+  assert.equal(result.summary, summary);
+  assert.equal(cancelled, true);
+});
+
+test('retries a detail body error and reports persistent failure with the article URL', async () => {
+  let attempts = 0;
+  const failBody = async () => {
+    attempts++;
+    return new Response(new ReadableStream({
+      pull(controller) { controller.error(new Error('body stream timed out')); },
+    }));
+  };
+  const result = await readDetail(async () => {
+    if (attempts === 0) return failBody();
+    return new Response('<h1>Article title</h1><div class="u-rich-text-blog"><p>' + paragraph + '</p></div>');
+  });
+  assert.equal(result.summary, paragraph);
+  attempts = 0;
+  await assert.rejects(readDetail(failBody), /article request failed: .*building-always-on-agents: body stream timed out/);
+  assert.equal(attempts, 2);
+});
+
+test('a detail stream interrupted before the closing tag fails even when the partial response contains a paragraph', async () => {
+  let attempts = 0;
+  const bytes = new TextEncoder().encode('<main><article><h1>Article title</h1><div class="text-rich-text--article"><p>' + paragraph + '</p>');
+  await assert.rejects(readDetail(async () => {
+    attempts++;
+    let sent = false;
+    return new Response(new ReadableStream({
+      pull(controller) {
+        if (sent) controller.error(new Error('incomplete response'));
+        else controller.enqueue(bytes);
+        sent = true;
+      },
+    }));
+  }), /article request failed: .*building-always-on-agents: incomplete response/);
+  assert.equal(attempts, 2);
 });

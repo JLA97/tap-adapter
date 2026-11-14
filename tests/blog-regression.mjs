@@ -15,8 +15,8 @@ const card=(slug='featured',date='Nov 5, 2026')=>`<a class="ResourceCard" href="
 const entry=(id='api',date='2026-11-04',extra={})=>({_id:id,_type:'blogPost',title:id,slug:id,date,category:{name:'Product updates'},...extra});
 function claudeRun({cards=card(),pages=[{items:[entry()],total:1}],limit=20,detailStatus=200}={}) {
  let calls=[];
- const fetch=async url=>{calls.push(url);if(url.startsWith('/api/')){const page=Number(new URL(url,'https://claude.com').searchParams.get('page'));return{ok:true,json:async()=>pages[Math.min(page-1,pages.length-1)]};}return{ok:detailStatus===200,status:detailStatus,text:async()=>`<h1>Full title</h1><div class="u-rich-text-blog"><p>${paragraph}</p></div>`};};
- return evaluate(claude,{args:{days:6,limit},document:parse('<main>'+cards+'</main>'),fetch}).then(async rows=>{const worker=claude.pipeline.find(x=>x.foreach).foreach.steps[0].evaluate; const items=await Promise.all(rows.map(item=>vm.runInNewContext(render(worker,{},item),{DOMParser,URL,AbortSignal,location:{origin:'https://claude.com'},fetch})));return {items:JSON.parse(JSON.stringify(items)),calls};});
+ const fetch=async url=>{calls.push(url);if(url.startsWith('/api/')){const page=Number(new URL(url,'https://claude.com').searchParams.get('page'));return{ok:true,json:async()=>pages[Math.min(page-1,pages.length-1)]};}return new Response(`<h1>Full title</h1><div class="u-rich-text-blog"><p>${paragraph}</p></div>`,{status:detailStatus});};
+ return evaluate(claude,{args:{days:6,limit},document:parse('<main>'+cards+'</main>'),fetch}).then(async rows=>{const worker=claude.pipeline.find(x=>x.foreach).foreach.steps[0].evaluate; const items=await Promise.all(rows.map(item=>vm.runInNewContext(render(worker,{},item),{DOMParser,URL,AbortSignal,TextDecoderStream,location:{origin:'https://claude.com'},fetch})));return {items:JSON.parse(JSON.stringify(items)),calls};});
 }
 test('Claude merges API-excluded featured articles and deduplicates visible/API overlap',async()=>{
  const {items}=await claudeRun({cards:card()+card('api','Nov 4, 2026')});
@@ -88,6 +88,6 @@ test('Claude retries a transient detail failure and reports a persistent failure
  const worker=claude.pipeline.find(x=>x.foreach).foreach.steps[0].evaluate;
  const item={title:'Retry',publishedDate:'November 5, 2026',category:'',url:'https://claude.com/resources/articles/retry',excerpt:''};
  let calls=0;
- const context={DOMParser,URL,AbortSignal,location:{origin:'https://claude.com'},fetch:async()=>{if(++calls===1)throw new Error('network timed out');return{ok:true,text:async()=>`<h1>Retry</h1><div class="u-rich-text-blog"><p>${paragraph}</p></div>`};}};
+ const context={DOMParser,URL,AbortSignal,TextDecoderStream,location:{origin:'https://claude.com'},fetch:async()=>{if(++calls===1)throw new Error('network timed out');return new Response(`<h1>Retry</h1><div class="u-rich-text-blog"><p>${paragraph}</p></div>`);}};
  const result=await vm.runInNewContext(render(worker,{},item),context);assert.equal(calls,2);assert.equal(result.summary,paragraph);
 });

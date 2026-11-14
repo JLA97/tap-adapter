@@ -65,7 +65,7 @@ export default {
   };
 
   // The site's View more control uses this public, date-ordered JSON endpoint.
-  // Keep local articles: the new index also syndicates external news/dev posts.
+  // The index also syndicates external news and developer posts.
   const selected = [];
   const seen = new Set();
   // Featured cards are excluded from the category API; merge them before filtering.
@@ -89,13 +89,17 @@ export default {
   let previousDate = Infinity;
   for (let page = 1; ; page++) {
     const listingUrl = '/api/resources/category?page=' + page + '&language=en&type=articles';
-    let response;
+    let data;
     for (let attempt = 0; attempt < 2; attempt++) {
-      try { response = await fetch(listingUrl, { signal: AbortSignal.timeout(10000) }); break; }
-      catch (error) { if (attempt === 1) throw new Error('Claude articles: listing request failed: ' + listingUrl + ': ' + error.message); }
+      try {
+        const response = await fetch(listingUrl, { signal: AbortSignal.timeout(10000) });
+        if (!response.ok) throw new Error('listing HTTP ' + response.status + ' on page ' + page);
+        data = await response.json();
+        break;
+      } catch (error) {
+        if (attempt === 1) throw new Error('Claude articles: listing request failed: ' + listingUrl + ': ' + error.message);
+      }
     }
-    if (!response.ok) throw new Error('Claude articles: listing HTTP ' + response.status + ' on page ' + page);
-    const data = await response.json();
     if (!Array.isArray(data.items) || !Number.isInteger(data.total) || data.total < 0) {
       throw new Error('Claude articles: unexpected listing schema on page ' + page);
     }
@@ -143,7 +147,7 @@ export default {
     {
       "foreach": {
         "as": "articles",
-        "concurrency": 4,
+        "concurrency": 2,
         "steps": [
           {
             "evaluate": `(async () => {
@@ -153,17 +157,40 @@ export default {
     if (!excerpt) throw new Error('Claude articles: external article summary missing: ' + article.url);
     return { ...fields, summary: excerpt.slice(0, 300) };
   }
-  let response;
+  const readArticle = async (response) => {
+    const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+    const parser = new DOMParser();
+    let html = '';
+    let checkedArticle = false;
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) return parser.parseFromString(html, 'text/html');
+        html += value;
+        // The article arrives before the rest of the layout and hydration data.
+        const articleEnd = checkedArticle ? -1 : html.indexOf('</article>');
+        if (articleEnd !== -1) {
+          checkedArticle = true;
+          const doc = parser.parseFromString(html.slice(0, articleEnd + '</article>'.length), 'text/html');
+          const body = doc.querySelector('main > article');
+          if (body?.querySelector('h1') && body.querySelector('.text-rich-text--article')) return body;
+        }
+      }
+    } finally {
+      reader.cancel().catch(() => {});
+    }
+  };
+  let doc;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      response = await fetch(article.url, { signal: AbortSignal.timeout(10000) });
+      const response = await fetch(article.url, { signal: AbortSignal.timeout(13000) });
       if (!response.ok) throw new Error('HTTP ' + response.status);
+      doc = await readArticle(response);
       break;
     } catch (error) {
       if (attempt === 1) throw new Error('Claude articles: article request failed: ' + article.url + ': ' + error.message);
     }
   }
-  const doc = new DOMParser().parseFromString(await response.text(), 'text/html');
   const rich = doc.querySelector('.text-rich-text--article, .u-rich-text-blog');
   const title = doc.querySelector('h1')?.textContent.trim();
   if (!rich || !title) throw new Error('Claude articles: article body/title missing: ' + article.url);
